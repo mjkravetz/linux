@@ -44,9 +44,9 @@
 #include "internal.h"
 #include "hugetlb_vmemmap.h"
 
-int hugetlb_max_hstate __read_mostly;
+int hugetlb_max_hstate __read_mostly = 1;	/* 1 dummy entry */
 unsigned int default_hstate_idx;
-struct hstate hstates[HUGE_MAX_HSTATE];
+struct hstate hstates[MAX_NUM_HSTATE];
 
 #ifdef CONFIG_CMA
 static struct cma *hugetlb_cma[MAX_NUMNODES];
@@ -82,6 +82,7 @@ struct mutex *hugetlb_fault_mutex_table ____cacheline_aligned_in_smp;
 
 /* Forward declaration */
 static int hugetlb_acct_memory(struct hstate *h, long delta);
+void __init hugetlb_add_dummy_hstate(void);
 
 static inline bool subpool_is_free(struct hugepage_subpool *spool)
 {
@@ -3150,7 +3151,7 @@ out:
 		__ATTR(_name, 0644, _name##_show, _name##_store)
 
 static struct kobject *hugepages_kobj;
-static struct kobject *hstate_kobjs[HUGE_MAX_HSTATE];
+static struct kobject *hstate_kobjs[MAX_NUM_HSTATE];
 
 static struct hstate *kobj_to_node_hstate(struct kobject *kobj, int *nidp);
 
@@ -3158,7 +3159,7 @@ static struct hstate *kobj_to_hstate(struct kobject *kobj, int *nidp)
 {
 	int i;
 
-	for (i = 0; i < HUGE_MAX_HSTATE; i++)
+	for (i = 1; i < MAX_NUM_HSTATE; i++)	/* 0 is dummy */
 		if (hstate_kobjs[i] == kobj) {
 			if (nidp)
 				*nidp = NUMA_NO_NODE;
@@ -3404,7 +3405,7 @@ static void __init hugetlb_sysfs_init(void)
  */
 struct node_hstate {
 	struct kobject		*hugepages_kobj;
-	struct kobject		*hstate_kobjs[HUGE_MAX_HSTATE];
+	struct kobject		*hstate_kobjs[MAX_NUM_HSTATE];
 };
 static struct node_hstate node_hstates[MAX_NUMNODES];
 
@@ -3433,7 +3434,7 @@ static struct hstate *kobj_to_node_hstate(struct kobject *kobj, int *nidp)
 	for (nid = 0; nid < nr_node_ids; nid++) {
 		struct node_hstate *nhs = &node_hstates[nid];
 		int i;
-		for (i = 0; i < HUGE_MAX_HSTATE; i++)
+		for (i = 1; i < MAX_NUM_HSTATE; i++)	/* 0 is dummy */
 			if (nhs->hstate_kobjs[i] == kobj) {
 				if (nidp)
 					*nidp = nid;
@@ -3581,6 +3582,7 @@ static int __init hugetlb_init(void)
 		}
 	}
 
+	hugetlb_add_dummy_hstate();
 	hugetlb_cma_check();
 	hugetlb_init_hstates();
 	gather_bootmem_prealloc();
@@ -3612,6 +3614,27 @@ bool __init __attribute((weak)) arch_hugetlb_valid_size(unsigned long size)
 	return size == HPAGE_SIZE;
 }
 
+void __init hugetlb_add_dummy_hstate(void)
+{
+	struct hstate *h;
+	unsigned long i;
+
+	h = &hstates[0];
+	mutex_init(&h->resize_lock);
+	h->order = 0;
+	h->mask = ~(huge_page_size(h) - 1);
+	for (i = 0; i < MAX_NUMNODES; ++i)
+		INIT_LIST_HEAD(&h->hugepage_freelists[i]);
+	INIT_LIST_HEAD(&h->hugepage_activelist);
+	h->next_nid_to_alloc = first_memory_node;
+	h->next_nid_to_free = first_memory_node;
+	snprintf(h->name, HSTATE_NAME_LEN, "hugepages-%lukB",
+					huge_page_size(h)/1024);
+	hugetlb_vmemmap_init(h);
+
+	parsed_hstate = h;
+}
+
 void __init hugetlb_add_hstate(unsigned int order)
 {
 	struct hstate *h;
@@ -3620,7 +3643,7 @@ void __init hugetlb_add_hstate(unsigned int order)
 	if (size_to_hstate(PAGE_SIZE << order)) {
 		return;
 	}
-	BUG_ON(hugetlb_max_hstate >= HUGE_MAX_HSTATE);
+	BUG_ON(hugetlb_max_hstate >= MAX_NUM_HSTATE);
 	BUG_ON(order == 0);
 	h = &hstates[hugetlb_max_hstate++];
 	mutex_init(&h->resize_lock);
@@ -4108,7 +4131,8 @@ static pte_t make_huge_pte(struct vm_area_struct *vma, struct page *page,
 				int writable)
 {
 	pte_t entry;
-	unsigned int shift = huge_page_shift(hstate_vma(vma));
+	struct hstate *h = hstate_vma(vma);
+	unsigned int shift = huge_page_shift(h);
 
 	if (writable) {
 		entry = huge_pte_mkwrite(huge_pte_mkdirty(mk_huge_pte(page,
@@ -4118,8 +4142,10 @@ static pte_t make_huge_pte(struct vm_area_struct *vma, struct page *page,
 					   vma->vm_page_prot));
 	}
 	entry = pte_mkyoung(entry);
-	entry = pte_mkhuge(entry);
-	entry = arch_make_huge_pte(entry, shift, vma->vm_flags);
+	if (huge_page_size(h) != PAGE_SIZE) {
+		entry = pte_mkhuge(entry);
+		entry = arch_make_huge_pte(entry, shift, vma->vm_flags);
+	}
 
 	return entry;
 }
@@ -5984,6 +6010,7 @@ pte_t *huge_pte_alloc(struct mm_struct *mm, struct vm_area_struct *vma,
 	pgd_t *pgd;
 	p4d_t *p4d;
 	pud_t *pud;
+	pmd_t *pmd;
 	pte_t *pte = NULL;
 
 	pgd = pgd_offset(mm, addr);
@@ -5994,15 +6021,20 @@ pte_t *huge_pte_alloc(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (pud) {
 		if (sz == PUD_SIZE) {
 			pte = (pte_t *)pud;
-		} else {
-			BUG_ON(sz != PMD_SIZE);
+		} else if (sz == PMD_SIZE) {
 			if (want_pmd_share(vma, addr) && pud_none(*pud))
 				pte = huge_pmd_share(mm, vma, addr, pud);
 			else
 				pte = (pte_t *)pmd_alloc(mm, pud, addr);
+		} else {
+			pmd = pmd_alloc(mm, pud, addr);
+			if (!pmd)
+				return NULL;
+			pte = pte_alloc_map(mm, pmd, addr);
 		}
 	}
-	BUG_ON(pte && pte_present(*pte) && !pte_huge(*pte));
+	if (sz != PAGE_SIZE)
+		BUG_ON(pte && pte_present(*pte) && !pte_huge(*pte));
 
 	return pte;
 }
@@ -6023,6 +6055,7 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 	p4d_t *p4d;
 	pud_t *pud;
 	pmd_t *pmd;
+	pte_t *pte;
 
 	pgd = pgd_offset(mm, addr);
 	if (!pgd_present(*pgd))
@@ -6037,11 +6070,17 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 		return (pte_t *)pud;
 	if (!pud_present(*pud))
 		return NULL;
-	/* must have a valid entry and size to go further */
 
 	pmd = pmd_offset(pud, addr);
-	/* must be pmd huge, non-present or none */
-	return (pte_t *)pmd;
+	if (sz == PMD_SIZE)
+		/* must be pmd huge, non-present or none */
+		return (pte_t *)pmd;
+	if (!pmd_present(*pmd))
+		return NULL;
+
+	pte = pte_offset_map(pmd, addr);
+	/* valid pte, non-present or none */
+	return pte;
 }
 
 #endif /* CONFIG_ARCH_WANT_GENERAL_HUGETLB */

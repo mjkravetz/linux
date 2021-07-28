@@ -293,6 +293,7 @@ void __init hugetlb_vmemmap_init(struct hstate *h)
 	if (likely(vmemmap_pages > RESERVE_VMEMMAP_NR))
 		h->nr_free_vmemmap_pages = vmemmap_pages - RESERVE_VMEMMAP_NR;
 
-	pr_info("can free %d vmemmap pages for %s\n", h->nr_free_vmemmap_pages,
-		h->name);
+	if (h->order)	/* skip dummy */
+		pr_info("can free %d vmemmap pages for %s\n",
+				h->nr_free_vmemmap_pages, h->name);
 }

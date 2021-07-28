@@ -42,21 +42,21 @@ struct hugetlb_cgroup {
 	/*
 	 * the counter to account for hugepages from hugetlb.
 	 */
-	struct page_counter hugepage[HUGE_MAX_HSTATE];
+	struct page_counter hugepage[MAX_NUM_HSTATE];
 
 	/*
 	 * the counter to account for hugepage reservations from hugetlb.
 	 */
-	struct page_counter rsvd_hugepage[HUGE_MAX_HSTATE];
+	struct page_counter rsvd_hugepage[MAX_NUM_HSTATE];
 
-	atomic_long_t events[HUGE_MAX_HSTATE][HUGETLB_NR_MEMORY_EVENTS];
-	atomic_long_t events_local[HUGE_MAX_HSTATE][HUGETLB_NR_MEMORY_EVENTS];
+	atomic_long_t events[MAX_NUM_HSTATE][HUGETLB_NR_MEMORY_EVENTS];
+	atomic_long_t events_local[MAX_NUM_HSTATE][HUGETLB_NR_MEMORY_EVENTS];
 
 	/* Handle for "hugetlb.events" */
-	struct cgroup_file events_file[HUGE_MAX_HSTATE];
+	struct cgroup_file events_file[MAX_NUM_HSTATE];
 
 	/* Handle for "hugetlb.events.local" */
-	struct cgroup_file events_local_file[HUGE_MAX_HSTATE];
+	struct cgroup_file events_local_file[MAX_NUM_HSTATE];
 };
 
 static inline struct hugetlb_cgroup *

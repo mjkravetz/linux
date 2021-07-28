@@ -1423,7 +1423,7 @@ static struct file_system_type hugetlbfs_fs_type = {
 	.kill_sb		= kill_litter_super,
 };
 
-static struct vfsmount *hugetlbfs_vfsmount[HUGE_MAX_HSTATE];
+static struct vfsmount *hugetlbfs_vfsmount[MAX_NUM_HSTATE];
 
 static int can_do_hugetlb_shm(void)
 {

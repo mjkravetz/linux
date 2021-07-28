@@ -80,7 +80,7 @@ static inline bool hugetlb_cgroup_have_usage(struct hugetlb_cgroup *h_cg)
 {
 	int idx;
 
-	for (idx = 0; idx < hugetlb_max_hstate; idx++) {
+	for (idx = 1; idx < hugetlb_max_hstate; idx++) {	/* 1 dummy */
 		if (page_counter_read(
 				hugetlb_cgroup_counter_from_cgroup(h_cg, idx)))
 			return true;
@@ -93,7 +93,7 @@ static void hugetlb_cgroup_init(struct hugetlb_cgroup *h_cgroup,
 {
 	int idx;
 
-	for (idx = 0; idx < HUGE_MAX_HSTATE; idx++) {
+	for (idx = 0; idx < MAX_NUM_HSTATE; idx++) {
 		struct page_counter *fault_parent = NULL;
 		struct page_counter *rsvd_parent = NULL;
 		unsigned long limit;

@@ -117,6 +117,9 @@ void resv_map_release(struct kref *ref);
 extern spinlock_t hugetlb_lock;
 extern int hugetlb_max_hstate __read_mostly;
 #define for_each_hstate(h) \
+	for ((h) = &hstates[1]; (h) < &hstates[hugetlb_max_hstate]; (h)++)
+
+#define for_every_hstate(h) \
 	for ((h) = hstates; (h) < &hstates[hugetlb_max_hstate]; (h)++)
 
 struct hugepage_subpool *hugepage_new_subpool(struct hstate *h, long max_hpages,
@@ -647,8 +650,9 @@ struct hstate *size_to_hstate(unsigned long size);
 #ifndef HUGE_MAX_HSTATE
 #define HUGE_MAX_HSTATE 1
 #endif
+#define MAX_NUM_HSTATE (HUGE_MAX_HSTATE + 1)	/* 1 dummy hstate */
 
-extern struct hstate hstates[HUGE_MAX_HSTATE];
+extern struct hstate hstates[MAX_NUM_HSTATE];
 extern unsigned int default_hstate_idx;
 
 #define default_hstate (hstates[default_hstate_idx])
@@ -843,7 +847,8 @@ static inline spinlock_t *huge_pte_lockptr(struct hstate *h,
 {
 	if (huge_page_size(h) == PMD_SIZE)
 		return pmd_lockptr(mm, (pmd_t *) pte);
-	VM_BUG_ON(huge_page_size(h) == PAGE_SIZE);
+	if (huge_page_size(h) == PAGE_SIZE)
+		return &mm->page_table_lock;	/*FIXME FIXME FIXME */
 	return &mm->page_table_lock;
 }
 
