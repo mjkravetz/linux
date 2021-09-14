@@ -1603,6 +1603,12 @@ unsigned long ksys_mmap_pgoff(unsigned long addr, unsigned long len,
 			return -EBADF;
 		if (is_file_hugepages(file)) {
 			len = ALIGN(len, huge_page_size(hstate_file(file)));
+			if (flags & MAP_HUGETLB) {
+				if (!hugetlb_altmapsize_valid(file, flags)) {
+					retval = -EINVAL;
+					goto out_fput;
+				}
+			}
 		} else if (unlikely(flags & MAP_HUGETLB)) {
 			retval = -EINVAL;
 			goto out_fput;
