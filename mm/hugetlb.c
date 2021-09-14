@@ -4461,8 +4461,9 @@ void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct *vma,
 	pte_t *ptep;
 	pte_t pte;
 	spinlock_t *ptl;
+	struct page *orig_page;
 	struct page *page;
-	struct hstate *h = hstate_vma(vma);
+	struct hstate *h = alt_hstate_vma(vma);
 	unsigned long sz = huge_page_size(h);
 	struct mmu_notifier_range range;
 
@@ -4471,8 +4472,8 @@ void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct *vma,
 	BUG_ON(end & ~huge_page_mask(h));
 
 	/*
-	 * This is a hugetlb vma, all the pte entries should point
-	 * to huge page.
+	 * This is a hugetlb vma.  Unless there is an alternate PAGE_SIZE
+	 * mapping, the pte entries should point to huge page.
 	 */
 	tlb_change_page_size(tlb, sz);
 	tlb_start_vma(tlb, vma);
@@ -4517,6 +4518,7 @@ void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct *vma,
 		}
 
 		page = pte_page(pte);
+		orig_page = compound_head(page);
 		/*
 		 * If a reference page is supplied, it is because a specific
 		 * page is being unmapped, not a range. Ensure the page we
@@ -4540,8 +4542,9 @@ void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct *vma,
 		if (huge_pte_dirty(pte))
 			set_page_dirty(page);
 
+		/* FIXME, counts should be in mapping size, check fault code */
 		hugetlb_count_sub(pages_per_huge_page(h), mm);
-		page_remove_rmap(page, true);
+		page_remove_rmap(orig_page, true);
 
 		spin_unlock(ptl);
 		tlb_remove_page_size(tlb, page, huge_page_size(h));
@@ -4657,6 +4660,10 @@ static vm_fault_t hugetlb_cow(struct mm_struct *mm, struct vm_area_struct *vma,
 	vm_fault_t ret = 0;
 	unsigned long haddr = address & huge_page_mask(h);
 	struct mmu_notifier_range range;
+
+	/* FIXME */
+	printk("hugetlb_cow: entry\n");
+	dump_stack();
 
 	pte = huge_ptep_get(ptep);
 	old_page = pte_page(pte);
@@ -4892,13 +4899,15 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 			unsigned long address, pte_t *ptep, unsigned int flags)
 {
 	struct hstate *h = hstate_vma(vma);
+	struct hstate *alt_h = alt_hstate_vma(vma);
 	vm_fault_t ret = VM_FAULT_SIGBUS;
 	int anon_rmap = 0;
 	unsigned long size;
-	struct page *page;
+	struct page *hpage, *alt_page;
 	pte_t new_pte;
 	spinlock_t *ptl;
 	unsigned long haddr = address & huge_page_mask(h);
+	unsigned long alt_addr = address & huge_page_mask(alt_h);
 	bool new_page, new_pagecache_page = false;
 
 	/*
@@ -4923,8 +4932,8 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 
 retry:
 	new_page = false;
-	page = find_lock_page(mapping, idx);
-	if (!page) {
+	hpage = find_lock_page(mapping, idx);
+	if (!hpage) {
 		/* Check for page in userfault range */
 		if (userfaultfd_missing(vma)) {
 			ret = hugetlb_handle_userfault(vma, mapping, idx,
@@ -4933,8 +4942,8 @@ retry:
 			goto out;
 		}
 
-		page = alloc_huge_page(vma, haddr, 0);
-		if (IS_ERR(page)) {
+		hpage = alloc_huge_page(vma, haddr, 0);
+		if (IS_ERR(hpage)) {
 			/*
 			 * Returning error will result in faulting task being
 			 * sent SIGBUS.  The hugetlb fault mutex prevents two
@@ -4950,25 +4959,26 @@ retry:
 			ptl = huge_pte_lock(h, mm, ptep);
 			ret = 0;
 			if (huge_pte_none(huge_ptep_get(ptep)))
-				ret = vmf_error(PTR_ERR(page));
+				ret = vmf_error(PTR_ERR(hpage));
 			spin_unlock(ptl);
 			goto out;
 		}
-		clear_huge_page(page, address, pages_per_huge_page(h));
-		__SetPageUptodate(page);
+		/* FIXME, how does this apply to alternate size mappings */
+		clear_huge_page(hpage, address, pages_per_huge_page(h));
+		__SetPageUptodate(hpage);
 		new_page = true;
 
 		if (vma->vm_flags & VM_MAYSHARE) {
-			int err = huge_add_to_page_cache(page, mapping, idx);
+			int err = huge_add_to_page_cache(hpage, mapping, idx);
 			if (err) {
-				put_page(page);
+				put_page(hpage);
 				if (err == -EEXIST)
 					goto retry;
 				goto out;
 			}
 			new_pagecache_page = true;
 		} else {
-			lock_page(page);
+			lock_page(hpage);
 			if (unlikely(anon_vma_prepare(vma))) {
 				ret = VM_FAULT_OOM;
 				goto backout_unlocked;
@@ -4981,7 +4991,7 @@ retry:
 		 * don't have hwpoisoned swap entry for errored virtual address.
 		 * So we need to block hugepage fault by PG_hwpoison bit check.
 		 */
-		if (unlikely(PageHWPoison(page))) {
+		if (unlikely(PageHWPoison(hpage))) {
 			ret = VM_FAULT_HWPOISON_LARGE |
 				VM_FAULT_SET_HINDEX(hstate_index(h));
 			goto backout_unlocked;
@@ -4989,14 +4999,17 @@ retry:
 
 		/* Check for page in userfault range. */
 		if (userfaultfd_minor(vma)) {
-			unlock_page(page);
-			put_page(page);
+			unlock_page(hpage);
+			put_page(hpage);
 			ret = hugetlb_handle_userfault(vma, mapping, idx,
 						       flags, haddr,
 						       VM_UFFD_MINOR);
 			goto out;
 		}
 	}
+
+	/* alt_page (if specified) is within hpage */
+	alt_page = hpage + ((alt_addr - haddr) >> PAGE_SHIFT);
 
 	/*
 	 * If we are going to COW a private mapping later, we examine the
@@ -5013,24 +5026,24 @@ retry:
 		vma_end_reservation(h, vma, haddr);
 	}
 
-	ptl = huge_pte_lock(h, mm, ptep);
+	ptl = huge_pte_lock(alt_h, mm, ptep);
 	ret = 0;
 	if (!huge_pte_none(huge_ptep_get(ptep)))
 		goto backout;
 
 	if (anon_rmap) {
-		ClearHPageRestoreReserve(page);
-		hugepage_add_new_anon_rmap(page, vma, haddr);
+		ClearHPageRestoreReserve(hpage);
+		hugepage_add_new_anon_rmap(hpage, vma, alt_addr);
 	} else
-		page_dup_rmap(page, true);
-	new_pte = make_huge_pte(vma, page, ((vma->vm_flags & VM_WRITE)
+		page_dup_rmap(hpage, true);
+	new_pte = make_huge_pte(vma, alt_page, ((vma->vm_flags & VM_WRITE)
 				&& (vma->vm_flags & VM_SHARED)));
-	set_huge_pte_at(mm, haddr, ptep, new_pte);
+	set_huge_pte_at(mm, alt_addr, ptep, new_pte);
 
-	hugetlb_count_add(pages_per_huge_page(h), mm);
+	hugetlb_count_add(pages_per_huge_page(alt_h), mm);
 	if ((flags & FAULT_FLAG_WRITE) && !(vma->vm_flags & VM_SHARED)) {
 		/* Optimization, do the COW without a second fault */
-		ret = hugetlb_cow(mm, vma, address, ptep, page, ptl);
+		ret = hugetlb_cow(mm, vma, address, ptep, hpage, ptl);
 	}
 
 	spin_unlock(ptl);
@@ -5041,20 +5054,20 @@ retry:
 	 * been isolated for migration.
 	 */
 	if (new_page)
-		SetHPageMigratable(page);
+		SetHPageMigratable(hpage);
 
-	unlock_page(page);
+	unlock_page(hpage);
 out:
 	return ret;
 
 backout:
 	spin_unlock(ptl);
 backout_unlocked:
-	unlock_page(page);
+	unlock_page(hpage);
 	/* restore reserve for newly allocated pages not in page cache */
 	if (new_page && !new_pagecache_page)
-		restore_reserve_on_error(h, vma, haddr, page);
-	put_page(page);
+		restore_reserve_on_error(h, vma, haddr, hpage);
+	put_page(hpage);
 	goto out;
 }
 
@@ -5093,11 +5106,13 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	struct page *page = NULL;
 	struct page *pagecache_page = NULL;
 	struct hstate *h = hstate_vma(vma);
+	struct hstate *alt_h = alt_hstate_vma(vma);
 	struct address_space *mapping;
 	int need_wait_lock = 0;
 	unsigned long haddr = address & huge_page_mask(h);
+	unsigned long alt_haddr = address & huge_page_mask(alt_h);
 
-	ptep = huge_pte_offset(mm, haddr, huge_page_size(h));
+	ptep = huge_pte_offset(mm, alt_haddr, huge_page_size(alt_h));
 	if (ptep) {
 		/*
 		 * Since we hold no locks, ptep could be stale.  That is
@@ -5126,7 +5141,7 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	 */
 	mapping = vma->vm_file->f_mapping;
 	i_mmap_lock_read(mapping);
-	ptep = huge_pte_alloc(mm, vma, haddr, huge_page_size(h));
+	ptep = huge_pte_alloc(mm, vma, alt_haddr, huge_page_size(alt_h));
 	if (!ptep) {
 		i_mmap_unlock_read(mapping);
 		return VM_FAULT_OOM;
@@ -5180,7 +5195,7 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 								vma, haddr);
 	}
 
-	ptl = huge_pte_lock(h, mm, ptep);
+	ptl = huge_pte_lock(alt_h, mm, ptep);
 
 	/* Check for a racing update before calling hugetlb_cow */
 	if (unlikely(!pte_same(entry, huge_ptep_get(ptep))))
@@ -5209,9 +5224,9 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 		entry = huge_pte_mkdirty(entry);
 	}
 	entry = pte_mkyoung(entry);
-	if (huge_ptep_set_access_flags(vma, haddr, ptep, entry,
+	if (huge_ptep_set_access_flags(vma, alt_haddr, ptep, entry,
 						flags & FAULT_FLAG_WRITE))
-		update_mmu_cache(vma, haddr, ptep);
+		update_mmu_cache(vma, alt_haddr, ptep);
 out_put_page:
 	if (page != pagecache_page)
 		unlock_page(page);
