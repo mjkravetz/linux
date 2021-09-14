@@ -44,6 +44,11 @@
 #include "internal.h"
 #include "hugetlb_vmemmap.h"
 
+struct hugetlb_vma_priv {
+	struct resv_map *resv_map;
+	struct hstate *alt_hstate;
+};
+
 int hugetlb_max_hstate __read_mostly = 1;	/* 1 dummy entry */
 unsigned int default_hstate_idx;
 struct hstate hstates[MAX_NUM_HSTATE];
@@ -864,15 +869,63 @@ __weak unsigned long vma_mmu_pagesize(struct vm_area_struct *vma)
  * reference it, this region map represents those offsets which have consumed
  * reservation ie. where pages have been instantiated.
  */
-static unsigned long get_vma_private_data(struct vm_area_struct *vma)
+static unsigned long get_vma_priv_resv_data(struct vm_area_struct *vma)
 {
-	return (unsigned long)vma->vm_private_data;
+	struct hugetlb_vma_priv *hvp = vma->vm_private_data;
+
+	if (!hvp)
+		return (unsigned long)hvp;
+
+	return (unsigned long)hvp->resv_map;
 }
 
-static void set_vma_private_data(struct vm_area_struct *vma,
+static void set_vma_priv_resv_data(struct vm_area_struct *vma,
 							unsigned long value)
 {
-	vma->vm_private_data = (void *)value;
+	struct hugetlb_vma_priv *hvp = vma->vm_private_data;
+
+	if (!hvp) {
+		hvp = kzalloc(sizeof(struct hugetlb_vma_priv), GFP_KERNEL);
+		VM_BUG_ON(!hvp);	/* FIXME */
+		vma->vm_private_data = hvp;
+	}
+
+	hvp->resv_map = (struct resv_map *)value;
+}
+
+static struct hstate *get_vma_priv_alt_hstate(struct vm_area_struct *vma)
+{
+	struct hugetlb_vma_priv *hvp = vma->vm_private_data;
+
+	if (hvp)
+		return hvp->alt_hstate;
+
+	return NULL;
+}
+
+void set_vma_priv_alt_hstate(struct vm_area_struct *vma, struct hstate *h)
+{
+	struct hugetlb_vma_priv *hvp = vma->vm_private_data;
+
+	if (hvp)	/* FIXME */
+		pr_warn("HugeTLB unexpected vma private area data\n");
+	else {
+		hvp = kzalloc(sizeof(struct hugetlb_vma_priv), GFP_KERNEL);
+		VM_BUG_ON(!hvp);	/* FIXME */
+		vma->vm_private_data = hvp;
+		hvp->alt_hstate = h;
+	}
+}
+
+static inline struct hstate *alt_hstate_vma(struct vm_area_struct *vma)
+{
+	struct hstate *h;
+
+	h = get_vma_priv_alt_hstate(vma);
+	if (h)
+		return h;
+
+	return hstate_vma(vma);
 }
 
 static void
@@ -968,7 +1021,7 @@ static struct resv_map *vma_resv_map(struct vm_area_struct *vma)
 		return inode_resv_map(inode);
 
 	} else {
-		return (struct resv_map *)(get_vma_private_data(vma) &
+		return (struct resv_map *)(get_vma_priv_resv_data(vma) &
 							~HPAGE_RESV_MASK);
 	}
 }
@@ -978,7 +1031,7 @@ static void set_vma_resv_map(struct vm_area_struct *vma, struct resv_map *map)
 	VM_BUG_ON_VMA(!is_vm_hugetlb_page(vma), vma);
 	VM_BUG_ON_VMA(vma->vm_flags & VM_MAYSHARE, vma);
 
-	set_vma_private_data(vma, (get_vma_private_data(vma) &
+	set_vma_priv_resv_data(vma, (get_vma_priv_resv_data(vma) &
 				HPAGE_RESV_MASK) | (unsigned long)map);
 }
 
@@ -987,22 +1040,36 @@ static void set_vma_resv_flags(struct vm_area_struct *vma, unsigned long flags)
 	VM_BUG_ON_VMA(!is_vm_hugetlb_page(vma), vma);
 	VM_BUG_ON_VMA(vma->vm_flags & VM_MAYSHARE, vma);
 
-	set_vma_private_data(vma, get_vma_private_data(vma) | flags);
+	set_vma_priv_resv_data(vma, get_vma_priv_resv_data(vma) | flags);
 }
 
 static int is_vma_resv_set(struct vm_area_struct *vma, unsigned long flag)
 {
 	VM_BUG_ON_VMA(!is_vm_hugetlb_page(vma), vma);
 
-	return (get_vma_private_data(vma) & flag) != 0;
+	return (get_vma_priv_resv_data(vma) & flag) != 0;
 }
 
 /* Reset counters to 0 and clear all HPAGE_RESV_* flags */
 void reset_vma_resv_huge_pages(struct vm_area_struct *vma)
 {
+	struct hugetlb_vma_priv *hvp = vma->vm_private_data;
+
 	VM_BUG_ON_VMA(!is_vm_hugetlb_page(vma), vma);
-	if (!(vma->vm_flags & VM_MAYSHARE))
-		vma->vm_private_data = (void *)0;
+
+	if (!hvp)
+		return;
+
+	vma->vm_private_data = kmalloc(sizeof(struct hugetlb_vma_priv),
+								GFP_KERNEL);
+	VM_BUG_ON(!vma->vm_private_data);	/* FIXME */
+	*((struct hugetlb_vma_priv *)vma->vm_private_data) = *hvp;
+	hvp = vma->vm_private_data;
+
+	if (!(vma->vm_flags & VM_MAYSHARE)) {
+		hvp->resv_map = (void *)0;
+		return;
+	}
 }
 
 /* Returns true if the VMA has associated reserve pages */
@@ -1526,6 +1593,17 @@ struct hstate *size_to_hstate(unsigned long size)
 	struct hstate *h;
 
 	for_each_hstate(h) {
+		if (huge_page_size(h) == size)
+			return h;
+	}
+	return NULL;
+}
+
+struct hstate *size_to_every_hstate(unsigned long size)
+{
+	struct hstate *h;
+
+	for_every_hstate(h) {
 		if (huge_page_size(h) == size)
 			return h;
 	}
@@ -4046,7 +4124,17 @@ out:
 
 static void hugetlb_vm_op_open(struct vm_area_struct *vma)
 {
-	struct resv_map *resv = vma_resv_map(vma);
+	struct hugetlb_vma_priv *hvp = vma->vm_private_data;
+	struct resv_map *resv;
+
+	if (!hvp)
+		return;
+
+	resv = vma_resv_map(vma);
+	vma->vm_private_data = kmalloc(sizeof(struct hugetlb_vma_priv),
+			GFP_KERNEL);
+	VM_BUG_ON(!vma->vm_private_data);
+	*((struct hugetlb_vma_priv *)vma->vm_private_data) = *hvp;
 
 	/*
 	 * This new VMA should share its siblings reservation map if present.
@@ -4069,7 +4157,7 @@ static void hugetlb_vm_op_close(struct vm_area_struct *vma)
 	long gbl_reserve;
 
 	if (!resv || !is_vma_resv_set(vma, HPAGE_RESV_OWNER))
-		return;
+		goto free_priv_data;
 
 	start = vma_hugecache_offset(h, vma, vma->vm_start);
 	end = vma_hugecache_offset(h, vma, vma->vm_end);
@@ -4086,6 +4174,13 @@ static void hugetlb_vm_op_close(struct vm_area_struct *vma)
 	}
 
 	kref_put(&resv->refs, resv_map_release);
+
+	/* one hugetlb_vma_priv struct per vma.  no sharing */
+free_priv_data:
+	if (vma->vm_private_data) {
+		kfree(vma->vm_private_data);
+		vma->vm_private_data = NULL;
+	}
 }
 
 static int hugetlb_vm_op_split(struct vm_area_struct *vma, unsigned long addr)
@@ -4131,7 +4226,7 @@ static pte_t make_huge_pte(struct vm_area_struct *vma, struct page *page,
 				int writable)
 {
 	pte_t entry;
-	struct hstate *h = hstate_vma(vma);
+	struct hstate *h = alt_hstate_vma(vma);
 	unsigned int shift = huge_page_shift(h);
 
 	if (writable) {

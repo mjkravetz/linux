@@ -473,6 +473,7 @@ extern const struct vm_operations_struct hugetlb_vm_ops;
 struct file *hugetlb_file_setup(const char *name, size_t size, vm_flags_t acct,
 				struct ucounts **ucounts, int creat_flags,
 				int page_size_log);
+bool hugetlb_altmapsize_valid(struct file *file, unsigned long flags);
 
 static inline bool is_file_hugepages(struct file *file)
 {
@@ -495,6 +496,12 @@ hugetlb_file_setup(const char *name, size_t size, vm_flags_t acctflag,
 		int page_size_log)
 {
 	return ERR_PTR(-ENOSYS);
+}
+
+static inline bool hugetlb_altmapsize_valid(struct file *file,
+						unsigned long flags)
+{
+	return false;
 }
 
 static inline struct hstate *hstate_inode(struct inode *i)
@@ -646,6 +653,8 @@ int __init alloc_bootmem_huge_page(struct hstate *h);
 void __init hugetlb_add_hstate(unsigned order);
 bool __init arch_hugetlb_valid_size(unsigned long size);
 struct hstate *size_to_hstate(unsigned long size);
+struct hstate *size_to_every_hstate(unsigned long size);
+void set_vma_priv_alt_hstate(struct vm_area_struct *vma, struct hstate *h);
 
 #ifndef HUGE_MAX_HSTATE
 #define HUGE_MAX_HSTATE 1
@@ -682,6 +691,14 @@ static inline struct hstate *hstate_sizelog(int page_size_log)
 		return &default_hstate;
 
 	return size_to_hstate(1UL << page_size_log);
+}
+
+static inline struct hstate *hstate_every_sizelog(int page_size_log)
+{
+	if (!page_size_log)
+		return &default_hstate;
+
+	return size_to_every_hstate(1UL << page_size_log);
 }
 
 static inline struct hstate *hstate_vma(struct vm_area_struct *vma)

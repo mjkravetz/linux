@@ -136,6 +136,14 @@ static int hugetlbfs_file_mmap(struct file *file, struct vm_area_struct *vma)
 	int ret;
 	struct hstate *h = hstate_file(file);
 
+	if (file->private_data) {		/* alternate mapping */
+		struct hstate *alt_hstate = file->private_data;
+
+		printk("hugetlbfs_file_mmap: alternate mapping size %lukB\n",
+				huge_page_size(alt_hstate)/1024);
+		set_vma_priv_alt_hstate(vma, alt_hstate);
+	}
+
 	/*
 	 * vma address alignment (but not the pgoff alignment) has
 	 * already been checked by prepare_hugepage_range.  If you add
@@ -1439,6 +1447,24 @@ static int get_hstate_idx(int page_size_log)
 	if (!h)
 		return -1;
 	return hstate_index(h);
+}
+
+bool hugetlb_altmapsize_valid(struct file *file, unsigned long flags)
+{
+	struct hstate *h, *file_hstate = hstate_file(file);
+
+	h = hstate_every_sizelog((flags >> MAP_HUGE_SHIFT) & MAP_HUGE_MASK);
+	if (!h)
+		return false;	/* invalid size specified */
+
+	if (h == file_hstate)
+		return true;	/* specified size is same as default */
+
+	if (h->order > file_hstate->order)	/* alt size must be smaller */
+		return false;
+
+	file->private_data = h;	/* stash away alternate mapping hstate */
+	return true;
 }
 
 /*
